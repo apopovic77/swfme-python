@@ -523,3 +523,7 @@ class OrchestratedProcess(Process):
             for p, flag in self.children
         ]
         return base
+
+# Convenience constants for easy import
+SEQUENTIAL = ProcessExecutionFlags.SEQUENTIAL
+PARALLEL = ProcessExecutionFlags.PARALLEL
