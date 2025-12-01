@@ -5,6 +5,7 @@ sWFME Development Server
 Launches the FastAPI server with demo workflows registered.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from examples.simple_workflow import (
     ProcessAnalyzeData,
     ProcessSaveResult
 )
+from examples.math_workflow import MathPipeline
 from swfme.registry.process_registry import process_registry
 
 
@@ -39,6 +41,7 @@ def register_demo_workflows():
     process_registry.register(ProcessValidateData, "ValidateData")
     process_registry.register(ProcessAnalyzeData, "AnalyzeData")
     process_registry.register(ProcessSaveResult, "SaveResult")
+    process_registry.register(MathPipeline, "MathPipeline")
 
     registered = process_registry.list_processes()
     print(f"   ✓ Registered {len(registered)} processes:")
@@ -49,6 +52,8 @@ def register_demo_workflows():
 if __name__ == "__main__":
     import uvicorn
 
+    port = int(os.getenv("PORT", "8000"))
+
     print("=" * 70)
     print("🚀 sWFME Development Server")
     print("=" * 70)
@@ -57,14 +62,14 @@ if __name__ == "__main__":
     register_demo_workflows()
 
     print("\n" + "=" * 70)
-    print("🌐 Starting FastAPI server...")
+    print(f"🌐 Starting FastAPI server on port {port}...")
     print("=" * 70)
     print("\n📍 API Documentation:")
-    print("   • Swagger UI:  http://localhost:8000/docs")
-    print("   • ReDoc:       http://localhost:8000/redoc")
-    print("   • Health:      http://localhost:8000/api/health")
+    print(f"   • Swagger UI:  http://localhost:{port}/docs")
+    print(f"   • ReDoc:       http://localhost:{port}/redoc")
+    print(f"   • Health:      http://localhost:{port}/api/health")
     print("\n📡 WebSocket:")
-    print("   • Monitor All: ws://localhost:8000/api/ws/monitor/all")
+    print(f"   • Monitor All: ws://localhost:{port}/api/ws/monitor/all")
     print("\n" + "=" * 70)
     print()
 
@@ -72,7 +77,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=port,
         log_level="info"
         # Note: reload=True requires import string format
         # Use: uvicorn server:app --reload for development

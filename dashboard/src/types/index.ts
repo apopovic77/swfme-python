@@ -20,6 +20,13 @@ export interface Workflow {
   output_parameters: Record<string, Parameter>;
 }
 
+export interface WorkflowFormValue {
+  name: string;
+  type: string;
+  required?: boolean;
+  value: any;
+}
+
 export interface ProcessMetrics {
   process_id: string;
   process_name: string;
@@ -65,6 +72,10 @@ export interface ProcessEvent {
   group_index?: number;
   group_size?: number;
   execution_mode?: 'sequential' | 'parallel';
+  io_snapshot?: {
+    inputs?: Record<string, { type: string; required: boolean; value: any }>;
+    outputs?: Record<string, { type: string; required: boolean; value: any }>;
+  };
 }
 
 export interface WorkflowExecuteRequest {
@@ -95,4 +106,30 @@ export interface HealthResponse {
       event_types: string[];
     };
   };
+}
+
+export interface WorkflowGraphNode {
+  id: string;
+  name: string;
+  class_name: string;
+  type: string;
+  group_index: number;
+  execution_flag: string;
+  inputs: Record<string, string>;
+  outputs: Record<string, string>;
+}
+
+export interface WorkflowGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  source_param: string;
+  target_param: string;
+  param_type: string;
+}
+
+export interface WorkflowGraphResponse {
+  workflow: string;
+  nodes: WorkflowGraphNode[];
+  edges: WorkflowGraphEdge[];
 }

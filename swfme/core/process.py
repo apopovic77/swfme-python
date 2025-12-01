@@ -490,6 +490,27 @@ class OrchestratedProcess(Process):
         """
         pass
 
+    async def after_children_executed(self) -> None:
+        """
+        Hook called after all child processes have been executed.
+
+        Override this method to perform post-execution logic,
+        such as aggregating results from child processes or
+        creating additional processes based on child outputs.
+
+        This method is called after all children have completed
+        but before the orchestrated process itself is marked as complete.
+
+        Example:
+            async def after_children_executed(self):
+                # Aggregate results from child processes
+                total = 0
+                for child, _flag in self._children:
+                    total += child.output["value"].value
+                self.output["total"].value = total
+        """
+        pass
+
     async def execute_impl(self):
         """
         Execute all child processes according to execution flags.
@@ -562,6 +583,9 @@ class OrchestratedProcess(Process):
         for source, target in param_connections:
             if source.value is not None:
                 target.value = source.value
+
+        # Call hook for post-execution logic
+        await self.after_children_executed()
 
     def _group_processes(self) -> List[List[Process]]:
         """

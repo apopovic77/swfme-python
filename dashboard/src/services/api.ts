@@ -12,6 +12,7 @@ import type {
   AggregatedMetrics,
   ProcessEvent,
   HealthResponse,
+  WorkflowGraphResponse,
 } from '../types';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
@@ -107,6 +108,14 @@ export class SwfmeApiClient {
   createWebSocket(processId: string = 'all'): WebSocket {
     const wsUrl = this.baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
     return new WebSocket(`${wsUrl}/ws/monitor/${processId}`);
+  }
+
+  async getWorkflowGraph(name: string): Promise<WorkflowGraphResponse> {
+    const response = await fetch(`${this.baseUrl}/workflows/${name}/graph`);
+    if (!response.ok) {
+      throw new Error(`Failed to load workflow graph: ${response.statusText}`);
+    }
+    return response.json();
   }
 }
 

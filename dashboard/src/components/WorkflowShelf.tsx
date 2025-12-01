@@ -4,9 +4,9 @@ interface WorkflowShelfProps {
   workflows: Workflow[];
   loading: boolean;
   error: string | null;
-  executing: string | null;
   lastRun: WorkflowExecuteResponse | null;
-  onExecute: (workflow: Workflow) => void;
+  selectedWorkflowName: string | null;
+  onSelect: (workflow: Workflow) => void;
   onRefresh: () => void;
 }
 
@@ -14,9 +14,9 @@ export function WorkflowShelf({
   workflows,
   loading,
   error,
-  executing,
   lastRun,
-  onExecute,
+  selectedWorkflowName,
+  onSelect,
   onRefresh,
 }: WorkflowShelfProps) {
   return (
@@ -58,9 +58,13 @@ export function WorkflowShelf({
           {workflows.map((workflow) => {
             const inputCount = Object.keys(workflow.input_parameters || {}).length;
             const outputCount = Object.keys(workflow.output_parameters || {}).length;
+            const isSelected = selectedWorkflowName === workflow.name;
 
             return (
-              <article key={workflow.name} className="workflow-card">
+              <article
+                key={workflow.name}
+                className={`workflow-card ${isSelected ? 'workflow-card--selected' : ''}`}
+              >
                 <div className="workflow-heading">
                   <div>
                     <p className="eyebrow">{workflow.module}</p>
@@ -94,10 +98,10 @@ export function WorkflowShelf({
 
                 <button
                   className="primary block"
-                  onClick={() => onExecute(workflow)}
-                  disabled={!!executing}
+                  onClick={() => onSelect(workflow)}
+                  disabled={loading}
                 >
-                  {executing === workflow.name ? 'Executing…' : 'Run workflow'}
+                  {isSelected ? 'Loaded' : 'Load workflow'}
                 </button>
               </article>
             );

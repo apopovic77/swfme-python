@@ -45,7 +45,7 @@ class ProcessLoadData(AtomarProcess):
 
         # Simulate loading data
         print(f"📂 Loading data from: {filename}")
-        await asyncio.sleep(0.5)  # Simulate I/O
+        await asyncio.sleep(1.2)  # Simulate I/O
 
         # Generate fake data
         data = [
@@ -72,7 +72,7 @@ class ProcessTransformData(AtomarProcess):
         data = self.input["data"].value
 
         print(f"🔄 Transforming {len(data)} rows...")
-        await asyncio.sleep(0.3)  # Simulate processing
+        await asyncio.sleep(1.0)  # Simulate processing
 
         # Filter active items and double values
         transformed = [
@@ -98,7 +98,7 @@ class ProcessValidateData(AtomarProcess):
         data = self.input["data"].value
 
         print(f"✅ Validating {len(data)} rows...")
-        await asyncio.sleep(0.4)  # Simulate validation
+        await asyncio.sleep(1.0)  # Simulate validation
 
         errors = []
 
@@ -132,7 +132,7 @@ class ProcessAnalyzeData(AtomarProcess):
         data = self.input["data"].value
 
         print(f"📊 Analyzing {len(data)} rows...")
-        await asyncio.sleep(0.5)  # Simulate analysis
+        await asyncio.sleep(1.4)  # Simulate analysis
 
         values = [item["value"] for item in data]
 
@@ -168,7 +168,7 @@ class ProcessSaveResult(AtomarProcess):
             raise Exception("Cannot save: Data validation failed")
 
         print(f"💾 Saving {len(data)} rows with stats...")
-        await asyncio.sleep(0.3)  # Simulate saving
+        await asyncio.sleep(1.0)  # Simulate saving
 
         # Simulate file write
         path = "/tmp/result.json"

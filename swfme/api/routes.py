@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from swfme.registry.process_registry import process_registry
 from swfme.monitoring.event_bus import event_bus
 from swfme.monitoring.metrics import metrics_collector
+from swfme.core.process import OrchestratedProcess
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -76,6 +77,28 @@ class AggregatedMetricsResponse(BaseModel):
     last_execution_at: Optional[str] = None
 
 
+class GraphNode(BaseModel):
+    """Graph node for workflow orchestration"""
+    id: str
+    name: str
+    class_name: str
+    type: str
+    group_index: int
+    execution_flag: str
+    inputs: Dict[str, str]
+    outputs: Dict[str, str]
+
+
+class GraphEdge(BaseModel):
+    """Graph edge showing parameter connection"""
+    id: str
+    source: str
+    target: str
+    source_param: str
+    target_param: str
+    param_type: str
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ROUTER
 # ═══════════════════════════════════════════════════════════════════════════
@@ -117,6 +140,89 @@ async def get_workflow_info(name: str):
     if not info:
         raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
     return info
+
+
+@router.get("/workflows/{name}/graph", response_model=Dict[str, Any])
+async def get_workflow_graph(name: str):
+    """
+    Build the orchestration graph for an orchestrated workflow (static DAG).
+
+    Returns nodes (processes) and edges (parameter connections) without executing the workflow.
+    """
+    workflow = process_registry.create(name)
+    if not workflow:
+        raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
+
+    if not isinstance(workflow, OrchestratedProcess):
+        raise HTTPException(status_code=400, detail=f"Workflow '{name}' is not orchestrated")
+
+    # Ensure orchestration is defined
+    if not getattr(workflow, "_orchestration_defined", False):
+        workflow.orchestrate()
+        workflow._orchestration_defined = True
+
+    groups = workflow._group_processes()
+
+    # Map parameter object -> metadata (process, param name, direction, type)
+    param_map: Dict[int, Dict[str, Any]] = {}
+    nodes: List[GraphNode] = []
+
+    for group_index, group in enumerate(groups):
+        execution_flag = "parallel" if len(group) > 1 else "sequential"
+        for process in group:
+            node_inputs = {p.name: _type_name(p.param_type) for p in process.input.values()}
+            node_outputs = {p.name: _type_name(p.param_type) for p in process.output.values()}
+
+            # Record parameter metadata
+            for p in process.input.values():
+                param_map[id(p)] = {
+                    "process": process.name,
+                    "param": p.name,
+                    "direction": "input",
+                    "type": _type_name(p.param_type),
+                }
+            for p in process.output.values():
+                param_map[id(p)] = {
+                    "process": process.name,
+                    "param": p.name,
+                    "direction": "output",
+                    "type": _type_name(p.param_type),
+                }
+
+            nodes.append(GraphNode(
+                id=process.name,
+                name=process.name,
+                class_name=process.__class__.__name__,
+                type="atomic" if process.__class__.__name__.startswith("Process") else "process",
+                group_index=group_index,
+                execution_flag=execution_flag,
+                inputs=node_inputs,
+                outputs=node_outputs,
+            ))
+
+    edges: List[GraphEdge] = []
+    for source, target in getattr(workflow, "_param_connections", []):
+        source_meta = param_map.get(id(source))
+        target_meta = param_map.get(id(target))
+
+        # Skip edges that touch the orchestrator itself (avoid SaveResult -> Pipeline)
+        if not source_meta or not target_meta:
+            continue
+
+        edges.append(GraphEdge(
+            id=f"{source_meta['process']}:{source_meta['param']}->{target_meta['process']}:{target_meta['param']}",
+            source=source_meta["process"],
+            target=target_meta["process"],
+            source_param=source_meta["param"],
+            target_param=target_meta["param"],
+            param_type=source_meta["type"],
+        ))
+
+    return {
+        "workflow": workflow.name,
+        "nodes": [n.model_dump() for n in nodes],
+        "edges": [e.model_dump() for e in edges],
+    }
 
 
 @router.post("/workflows/execute", response_model=WorkflowExecuteResponse)
@@ -437,3 +543,15 @@ async def health_check():
             "event_stats": event_bus.get_stats()
         }
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _type_name(param_type: Any) -> str:
+    """Get a readable type name for a parameter."""
+    try:
+        return param_type.__name__
+    except Exception:
+        return str(param_type)

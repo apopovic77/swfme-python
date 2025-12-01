@@ -5,6 +5,7 @@ import { apiClient } from './services/api';
 import type { HealthResponse, Workflow, WorkflowExecuteResponse } from './types';
 import { WorkflowShelf } from './components/WorkflowShelf';
 import { LiveFlow } from './components/LiveFlow';
+import { WorkflowForm } from './components/WorkflowForm';
 
 function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -16,6 +17,7 @@ function App() {
   const [lastRun, setLastRun] = useState<WorkflowExecuteResponse | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [selectedWorkflowName, setSelectedWorkflowName] = useState<string | null>(null);
+  const [inputValues, setInputValues] = useState<Record<string, any>>({});
 
   useEffect(() => {
     refreshHealth();
@@ -36,9 +38,10 @@ function App() {
     try {
       setLoadingWorkflows(true);
       const data = await apiClient.listWorkflows();
-      setWorkflows(data);
-      if (!selectedWorkflowName && data.length > 0) {
-        setSelectedWorkflowName(data[0].name);
+      const orchestrated = data.filter((wf) => wf.type === 'orchestrated');
+      setWorkflows(orchestrated);
+      if (!selectedWorkflowName && orchestrated.length > 0) {
+        setSelectedWorkflowName(orchestrated[0].name);
       }
       setWorkflowsError(null);
     } catch (err) {
@@ -55,6 +58,11 @@ function App() {
 
       const parameters: Record<string, unknown> = {};
       for (const [key, param] of Object.entries(workflow.input_parameters)) {
+        const fromForm = inputValues[key];
+        if (fromForm !== undefined && fromForm !== '') {
+          parameters[key] = fromForm;
+          continue;
+        }
         if (param.required) {
           if (param.type === 'str' || param.type === 'string') {
             parameters[key] = key === 'filename' ? 'example.csv' : `${key}-sample`;
@@ -103,7 +111,15 @@ function App() {
   return (
     <div className="page">
       <section className="canvas-area">
-        <LiveFlow variant="canvas" />
+        <LiveFlow
+          variant="canvas"
+          activeWorkflowName={selectedWorkflowName}
+          onRun={runSelectedWorkflow}
+          isRunning={!!executingWorkflow}
+          activeWorkflow={workflows.find((w) => w.name === selectedWorkflowName) || null}
+          inputValues={inputValues}
+          onInputChange={(key, val) => setInputValues((prev) => ({ ...prev, [key]: val }))}
+        />
       </section>
 
       <div className={`side-overlay ${panelOpen ? 'open' : ''}`}>
@@ -158,12 +174,18 @@ function App() {
             workflows={workflows}
             loading={loadingWorkflows}
             error={workflowsError}
-            executing={executingWorkflow}
             lastRun={lastRun}
             selectedWorkflowName={selectedWorkflowName}
             onSelect={(workflow) => setSelectedWorkflowName(workflow.name)}
             onRefresh={refreshWorkflows}
           />
+          {selectedWorkflowName && (
+            <WorkflowForm
+              workflow={workflows.find((w) => w.name === selectedWorkflowName)!}
+              values={inputValues}
+              onChange={(key, val) => setInputValues((prev) => ({ ...prev, [key]: val }))}
+            />
+          )}
           <div className="event-panel">
             <p className="eyebrow">Event stream</p>
             <LiveFlow variant="feed" />
@@ -178,20 +200,6 @@ function App() {
       >
         {panelOpen ? 'Hide panel' : 'Show panel'}
       </button>
-
-      <div className="run-control">
-        <div className="run-info">
-          <span className="muted">Selected:</span>{' '}
-          <strong>{selectedWorkflowName ?? 'None'}</strong>
-        </div>
-        <button
-          className="primary"
-          onClick={runSelectedWorkflow}
-          disabled={!selectedWorkflowName || !!executingWorkflow}
-        >
-          {executingWorkflow ? 'Running…' : 'Run'}
-        </button>
-      </div>
     </div>
   );
 }
