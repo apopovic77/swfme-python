@@ -17,6 +17,7 @@ from datetime import datetime
 from enum import Enum
 
 from swfme.core.parameters import ParameterSet, InputParameter, OutputParameter
+from swfme.core.logging import ProcessLogger, process_log_config, ProcessLogLevel
 
 
 class ProcessStatus(Enum):
@@ -96,13 +97,21 @@ class Process(ABC):
         >>> print(process.output["sum"].value)  # 8
     """
 
-    def __init__(self, name: Optional[str] = None):
+    def __init__(self, name: Optional[str] = None, depth: int = 0):
         # Identity
         self.id = str(uuid.uuid4())
         self.name = name or self.__class__.__name__
 
+        # Execution depth (for nested orchestrated processes)
+        self._depth = depth
+
         # Logging
         self.logger = logging.getLogger(f"swfme.{self.__class__.__name__}")
+        self._process_logger = ProcessLogger(
+            process_name=self.name,
+            process_class=self.__class__.__name__,
+            depth=depth
+        )
 
         # Status
         self.status = ProcessStatus.PENDING
@@ -159,7 +168,13 @@ class Process(ABC):
             self.status = ProcessStatus.RUNNING
             self.started_at = datetime.utcnow()
 
-            await self._emit_event("started")
+            # Log start with inputs
+            self._process_logger.log_start(dict(self.input.items()) if self.input else None)
+
+            await self._emit_event(
+                "started",
+                io_snapshot=self._build_io_snapshot(include_outputs=False)
+            )
 
             # Validate inputs
             self.input.validate_all()
@@ -180,7 +195,16 @@ class Process(ABC):
                 (self.completed_at - self.started_at).total_seconds() * 1000
             )
 
-            await self._emit_event("completed")
+            # Log completion with outputs
+            self._process_logger.log_complete(
+                dict(self.output.items()) if self.output else None,
+                self.execution_time_ms
+            )
+
+            await self._emit_event(
+                "completed",
+                io_snapshot=self._build_io_snapshot()
+            )
 
             return True
 
@@ -189,12 +213,23 @@ class Process(ABC):
             self.status = ProcessStatus.FAILED
             self.completed_at = datetime.utcnow()
             self.error = str(e)
+            self.execution_time_ms = (
+                (self.completed_at - self.started_at).total_seconds() * 1000
+                if self.started_at else None
+            )
+
+            # Log failure
+            self._process_logger.log_failed(str(e), self.execution_time_ms)
 
             # Capture stacktrace
             import traceback
             self.error_stacktrace = traceback.format_exc()
 
-            await self._emit_event("failed", error=str(e))
+            await self._emit_event(
+                "failed",
+                error=str(e),
+                io_snapshot=self._build_io_snapshot(include_outputs=True)
+            )
 
             return False
 
@@ -243,6 +278,53 @@ class Process(ABC):
             self._event_handlers[event_type] = []
         self._event_handlers[event_type].append(handler)
 
+    def _build_io_snapshot(self, include_outputs: bool = True) -> Dict[str, Dict[str, Any]]:
+        """Build a lightweight, JSON-serializable preview of inputs/outputs."""
+        return {
+            "inputs": self._param_preview(self.input),
+            "outputs": self._param_preview(self.output) if include_outputs else {}
+        }
+
+    def _param_preview(self, params) -> Dict[str, Any]:
+        preview = {}
+        for name, param in params.items():
+            preview[name] = {
+                "type": param.param_type.__name__ if isinstance(param.param_type, type) else str(param.param_type),
+                "required": param.required,
+                "value": self._preview_value(param.value),
+            }
+        return preview
+
+    def _preview_value(self, val, depth: int = 0):
+        """Safe, short preview for event payloads."""
+        max_str = 120
+        max_items = 3
+
+        if depth > 2:
+            return "…"
+
+        if isinstance(val, (str, int, float, bool)) or val is None:
+            if isinstance(val, str) and len(val) > max_str:
+                return val[:max_str] + "…"
+            return val
+
+        if isinstance(val, list):
+            return {
+                "type": "list",
+                "len": len(val),
+                "preview": [self._preview_value(v, depth + 1) for v in val[:max_items]]
+            }
+
+        if isinstance(val, dict):
+            items = list(val.items())[:max_items]
+            return {
+                "type": "dict",
+                "len": len(val),
+                "preview": {k: self._preview_value(v, depth + 1) for k, v in items}
+            }
+
+        return str(val)[:max_str] + ("…" if len(str(val)) > max_str else "")
+
     def to_dict(self) -> dict:
         """Convert process to dictionary representation"""
         return {
@@ -289,8 +371,12 @@ class AtomarProcess(Process):
         ...         self.output["sum"].value = total
     """
 
-    def __init__(self, name: Optional[str] = None):
-        super().__init__(name)
+    def __init__(self, name: Optional[str] = None, depth: int = 0):
+        super().__init__(name, depth)
+
+    def define_parameters(self) -> None:
+        """Define parameters - override in subclass if needed."""
+        pass
 
 
 class OrchestratedProcess(Process):
@@ -337,11 +423,20 @@ class OrchestratedProcess(Process):
         ...         self.output["result"] = save.output["result"]
     """
 
-    def __init__(self, name: Optional[str] = None):
-        super().__init__(name)
-        self.children: List[Tuple[Process, ProcessExecutionFlags]] = []
+    def __init__(self, name: Optional[str] = None, depth: int = 0):
+        super().__init__(name, depth)
+        self._children: List[Tuple[Process, ProcessExecutionFlags]] = []
         self._orchestration_defined = False
         self._param_connections: List[Tuple] = []
+
+    @property
+    def children(self) -> List[Tuple[Process, ProcessExecutionFlags]]:
+        """Get child processes."""
+        return self._children
+
+    def define_parameters(self) -> None:
+        """Define parameters - override in subclass if needed."""
+        pass
 
     def add_child(self, process: Process, execution_flag: ProcessExecutionFlags):
         """
@@ -351,7 +446,11 @@ class OrchestratedProcess(Process):
             process: Child process instance
             execution_flag: Sequential or Parallel execution
         """
-        self.children.append((process, execution_flag))
+        # Update child's depth for proper log indentation
+        process._depth = self._depth + 1
+        process._process_logger._depth = self._depth + 1
+
+        self._children.append((process, execution_flag))
 
     def _connect_param(self, source, target):
         """
@@ -491,7 +590,7 @@ class OrchestratedProcess(Process):
         groups = []
         current_parallel_group = []
 
-        for process, flag in self.children:
+        for process, flag in self._children:
             if flag == ProcessExecutionFlags.SEQUENTIAL:
                 # Flush current parallel group
                 if current_parallel_group:
@@ -511,7 +610,7 @@ class OrchestratedProcess(Process):
 
     def get_child(self, name: str) -> Optional[Process]:
         """Get child process by name"""
-        for process, _ in self.children:
+        for process, _ in self._children:
             if process.name == name:
                 return process
         return None
@@ -524,7 +623,7 @@ class OrchestratedProcess(Process):
                 "process": p.to_dict(),
                 "execution_flag": flag.value
             }
-            for p, flag in self.children
+            for p, flag in self._children
         ]
         return base
 
