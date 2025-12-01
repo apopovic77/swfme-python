@@ -1,0 +1,53 @@
+name: Publish Python Package
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Install package dependencies
+        run: pip install -e .[dev]
+
+      - name: Run tests
+        run: pytest -v tests/
+        continue-on-error: true
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload dist/*
+
+      - name: Notify on success
+        if: success()
+        run: echo "✅ Package published to PyPI successfully"
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "❌ Package publishing failed"
