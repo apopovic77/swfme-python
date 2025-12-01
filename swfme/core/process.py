@@ -10,6 +10,7 @@ Year: 2025 (Modernized from 2010 C# version)
 
 import uuid
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime
@@ -99,6 +100,9 @@ class Process(ABC):
         # Identity
         self.id = str(uuid.uuid4())
         self.name = name or self.__class__.__name__
+
+        # Logging
+        self.logger = logging.getLogger(f"swfme.{self.__class__.__name__}")
 
         # Status
         self.status = ProcessStatus.PENDING
