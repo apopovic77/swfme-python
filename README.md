@@ -358,10 +358,11 @@ Contributions welcome! Please open an issue or PR.
 
 ## 📖 **Documentation**
 
-Full documentation coming soon. For now, check:
+- **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** - Comprehensive guide to Process-Oriented Programming
+- **[LEARNINGS.md](LEARNINGS.md)** - Real-world learnings & best practices from production systems
+- **[STORAGE_API_GUIDE.md](STORAGE_API_GUIDE.md)** - Storage API integration guide
 - `examples/simple_workflow.py` - Complete working example
 - Source code docstrings - Comprehensive inline documentation
-- `swfme/core/process.py` - Architecture overview
 
 ---
 

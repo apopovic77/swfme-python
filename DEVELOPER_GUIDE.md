@@ -1522,7 +1522,8 @@ metrics_collector = MetricsCollector()
 
 **Happy Process-Oriented Programming! 🚀**
 
-For specific integration guides:
+For more resources:
+- **Real-World Learnings**: See `LEARNINGS.md` - Best practices from production systems like CodePilot API
 - **Storage API Integration**: See `STORAGE_API_GUIDE.md`
 - **General README**: See `README.md`
 - **Examples**: See `examples/`
