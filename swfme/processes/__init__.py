@@ -12,7 +12,7 @@ from swfme.processes.communication import (
     ProcessSendEmail,
     ProcessFetchGmail,
 )
-from swfme.processes.ai import ProcessAIAnalyse
+from swfme.processes.ai import ProcessAIAnalyse, ProcessClaudeCliAnalyse
 from swfme.processes.data import (
     ProcessHTTPRequest,
     ProcessStoreContent,
@@ -24,6 +24,7 @@ __all__ = [
     "ProcessSendEmail",
     "ProcessFetchGmail",
     "ProcessAIAnalyse",
+    "ProcessClaudeCliAnalyse",
     "ProcessHTTPRequest",
     "ProcessStoreContent",
     "ProcessFetchContent",
