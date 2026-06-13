@@ -21,12 +21,23 @@ from swfme.core.logging import ProcessLogger, process_log_config, ProcessLogLeve
 
 
 class ProcessStatus(Enum):
-    """Process execution status"""
+    """Process execution status.
+
+    Forward path: PENDING → RUNNING → COMPLETED / FAILED / CANCELLED
+    Saga path:    FAILED → COMPENSATING → COMPENSATED / COMPENSATION_FAILED
+    Escalation:   COMPENSATION_FAILED → ESCALATED (operator notification sent)
+    """
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    COMPENSATING = "compensating"
+    COMPENSATED = "compensated"
+    COMPENSATION_FAILED = "compensation_failed"
+    ESCALATED = "escalated"
+    WAITING = "waiting"
+    EXPIRED = "expired"
 
 
 class ProcessExecutionFlags(Enum):
@@ -38,6 +49,33 @@ class ProcessExecutionFlags(Enum):
     """
     SEQUENTIAL = "sequential"
     PARALLEL = "parallel"
+
+
+class WorkflowSuspend(Exception):
+    """Raised by an AtomarProcess to suspend the surrounding workflow.
+
+    Two suspension kinds:
+      wait_for          — suspend until a matching external event arrives
+                          (resumed by swfme-api's Webhook-Worker) or until
+                          timeout_at passes (resumed by ExpirySweeper with
+                          triggered_by='timeout').
+      pending_decision  — suspend until a human/agent approver calls
+                          POST /api/runs/{id}/approve or /reject.
+
+    The engine catches this in OrchestratedProcess.execute_impl, persists the
+    suspension state and the resume-position, and returns control. On resume,
+    the suspended step's outputs are injected from the resume payload and
+    execution continues with the NEXT step — execute_impl of the suspended
+    step is NOT re-run.
+    """
+
+    def __init__(self, wait_for: Optional[dict] = None,
+                 pending_decision: Optional[dict] = None):
+        if not wait_for and not pending_decision:
+            raise ValueError("WorkflowSuspend needs wait_for or pending_decision")
+        self.wait_for = wait_for
+        self.pending_decision = pending_decision
+        super().__init__("workflow suspended")
 
 
 class ProcessExecutionContext:
@@ -120,6 +158,15 @@ class Process(ABC):
         self.execution_time_ms: Optional[float] = None
         self.error: Optional[str] = None
         self.error_stacktrace: Optional[str] = None
+
+        # Saga-Compensation state
+        self.compensated_at: Optional[datetime] = None
+        self.compensation_attempts: int = 0
+        self.compensation_error: Optional[str] = None
+
+        # Cross-run relations (for sub-workflows + async compensation child-runs)
+        self.parent_run_id: Optional[str] = None
+        self.parent_relation: Optional[str] = None  # 'compensation' | 'sub_workflow' | None
 
         # Parameters
         self.input = ParameterSet()
@@ -208,6 +255,13 @@ class Process(ABC):
 
             return True
 
+        except WorkflowSuspend:
+            # Not a failure — the workflow wants to sleep. Propagate to the
+            # runner which persists wait_for/pending_decision + returns.
+            self.status = ProcessStatus.WAITING
+            await self._emit_event("waiting")
+            raise
+
         except Exception as e:
             # Error handling
             self.status = ProcessStatus.FAILED
@@ -249,6 +303,106 @@ class Process(ABC):
             Exception: Any error during execution
         """
         pass
+
+    async def compensate(self) -> bool:
+        """
+        Compensate this process (Saga-Pattern rollback).
+
+        Template Method that orchestrates compensation lifecycle:
+        1. Mark as COMPENSATING + emit event
+        2. Call compensate_impl() (subclass-provided)
+        3. Mark as COMPENSATED or COMPENSATION_FAILED + emit event
+
+        Only processes that previously reached COMPLETED can be compensated —
+        otherwise there is nothing to roll back. A FAILED process gets compensated
+        by its parent OrchestratedProcess as part of the saga sweep (parent walks
+        back through completed children in reverse order).
+
+        Returns:
+            bool: True if compensation succeeded, False otherwise
+        """
+        if self.status not in (ProcessStatus.COMPLETED, ProcessStatus.FAILED):
+            self.logger.warning(
+                "compensate() called on '%s' but status is %s — skipping",
+                self.name, self.status.value,
+            )
+            return True  # nothing to compensate
+
+        try:
+            self.status = ProcessStatus.COMPENSATING
+            self.compensation_attempts += 1
+
+            await self._emit_event(
+                "compensating",
+                attempt=self.compensation_attempts,
+                io_snapshot=self._build_io_snapshot(include_outputs=True),
+            )
+
+            await self.compensate_impl()
+
+            self.status = ProcessStatus.COMPENSATED
+            self.compensated_at = datetime.utcnow()
+
+            await self._emit_event(
+                "compensated",
+                io_snapshot=self._build_io_snapshot(include_outputs=True),
+            )
+
+            self.logger.info("Compensation succeeded for '%s'", self.name)
+            return True
+
+        except Exception as e:
+            self.status = ProcessStatus.COMPENSATION_FAILED
+            self.compensation_error = str(e)
+
+            import traceback
+            self.error_stacktrace = traceback.format_exc()
+
+            await self._emit_event(
+                "compensation_failed",
+                error=str(e),
+                io_snapshot=self._build_io_snapshot(include_outputs=True),
+            )
+
+            self.logger.error(
+                "Compensation FAILED for '%s' on attempt %d: %s",
+                self.name, self.compensation_attempts, e,
+            )
+            return False
+
+    async def compensate_impl(self):
+        """
+        Subclass-provided compensation logic — the saga-rollback for this process.
+
+        Default: no-op. Override in subclasses that have side-effects worth
+        rolling back. Symmetric to execute_impl(): same access to self.input
+        and self.output. Should be idempotent (may be retried).
+
+        Example:
+            class DeleteArtrackRefs(AtomarProcess):
+                async def execute_impl(self):
+                    await artrack_api.delete_refs(self.input["asset_id"].value)
+                    self.output["deleted_count"].value = ...
+
+                async def compensate_impl(self):
+                    # restore the refs we deleted
+                    await artrack_api.restore_refs(self.input["asset_id"].value)
+        """
+        pass
+
+    @property
+    def has_compensation(self) -> bool:
+        """True if this process has overridden compensate_impl().
+
+        Used by OrchestratedProcess to decide which children to roll back
+        during a saga sweep. Walks the MRO to detect override vs inherited
+        default.
+        """
+        for klass in type(self).__mro__:
+            if "compensate_impl" in klass.__dict__:
+                # Found the most-derived definition
+                return klass is not Process
+        return False
 
     async def _emit_event(self, event_type: str, **kwargs):
         """Emit process event for monitoring"""
@@ -336,6 +490,12 @@ class Process(ABC):
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "execution_time_ms": self.execution_time_ms,
             "error": self.error,
+            "compensated_at": self.compensated_at.isoformat() if self.compensated_at else None,
+            "compensation_attempts": self.compensation_attempts,
+            "compensation_error": self.compensation_error,
+            "has_compensation": self.has_compensation,
+            "parent_run_id": self.parent_run_id,
+            "parent_relation": self.parent_relation,
             "input": self.input.to_dict(),
             "output": self.output.to_dict(),
             "context": {
@@ -428,6 +588,15 @@ class OrchestratedProcess(Process):
         self._children: List[Tuple[Process, ProcessExecutionFlags]] = []
         self._orchestration_defined = False
         self._param_connections: List[Tuple] = []
+        # Resume-support: set by the runner before execute() when waking a
+        # suspended run. _resume_from_step's outputs get injected from
+        # _resume_outputs, execution continues with the step AFTER it.
+        # _restored_outputs holds the persisted outputs of steps that
+        # completed BEFORE the suspension (keyed by step name) — restored
+        # into the pass-through steps so param-connections keep working.
+        self._resume_from_step: Optional[str] = None
+        self._resume_outputs: Optional[Dict[str, Any]] = None
+        self._restored_outputs: Optional[Dict[str, Dict[str, Any]]] = None
 
     @property
     def children(self) -> List[Tuple[Process, ProcessExecutionFlags]]:
@@ -438,17 +607,25 @@ class OrchestratedProcess(Process):
         """Define parameters - override in subclass if needed."""
         pass
 
-    def add_child(self, process: Process, execution_flag: ProcessExecutionFlags):
+    def add_child(self, process: Process, execution_flag: ProcessExecutionFlags,
+                  skip_when=None):
         """
         Add a child process to this orchestrated process.
 
         Args:
             process: Child process instance
             execution_flag: Sequential or Parallel execution
+            skip_when: optional callable(orchestrator) -> bool. Evaluated just
+                before the step runs; if it returns True the step is skipped
+                (status='skipped', no execute_impl, treated as completed
+                pass-through). Lets a workflow branch conditionally on prior
+                step outputs without a DSL — e.g. skip the Send-step when the
+                classifier said 'out_of_scope'.
         """
         # Update child's depth for proper log indentation
         process._depth = self._depth + 1
         process._process_logger._depth = self._depth + 1
+        process._skip_when = skip_when
 
         self._children.append((process, execution_flag))
 
@@ -521,7 +698,12 @@ class OrchestratedProcess(Process):
         3. Groups processes by sequential/parallel execution
         4. Executes groups in order
         5. Resolves output parameter connections
-        6. Handles failures
+        6. Handles failures — triggers saga-compensation sweep on completed children
+
+        Saga semantics: if any child fails, all previously-completed children with
+        `has_compensation == True` are compensated in REVERSE execution order
+        before the failure is re-raised to the caller. This means callers always
+        see "either all forward, or all compensated" — never partial-forward-state.
         """
         # Define orchestration if not already done
         if not self._orchestration_defined:
@@ -534,58 +716,212 @@ class OrchestratedProcess(Process):
         # Group processes by execution mode
         sequential_groups = self._group_processes()
 
-        # Execute groups
-        for group_idx, group in enumerate(sequential_groups):
-            await self._emit_event(
-                "group_started",
-                group_index=group_idx,
-                group_size=len(group),
-                execution_mode="parallel" if len(group) > 1 else "sequential"
-            )
+        # Track children completed successfully so we know what to compensate on failure.
+        completed_children: List[Process] = []
 
-            # Resolve parameter connections BEFORE executing this group
-            for source, target in param_connections:
-                # Only resolve if source has a value
-                if source.value is not None:
-                    target.value = source.value
+        # Resume-mode: skip already-executed steps up to and including the
+        # suspended one. Its outputs come from the resume payload.
+        resume_skip_active = self._resume_from_step is not None
+        resume_found = False
 
-            if len(group) == 1:
-                # Sequential execution
-                process = group[0]
-                success = await process.execute()
+        try:
+            # Execute groups
+            for group_idx, group in enumerate(sequential_groups):
+                if resume_skip_active and not resume_found:
+                    skip_group = False
+                    for process in group:
+                        if process.name == self._resume_from_step:
+                            # Inject resume outputs into the suspended step
+                            for k, v in (self._resume_outputs or {}).items():
+                                if k in process.output:
+                                    process.output[k].value = v
+                            process.status = ProcessStatus.COMPLETED
+                            completed_children.append(process)
+                            resume_found = True
+                            skip_group = True
+                        else:
+                            # Steps before the resume-point already ran in the
+                            # original execution — restore their persisted
+                            # outputs so param-connections downstream work.
+                            restored = (self._restored_outputs or {}).get(
+                                process.name, {}
+                            )
+                            for k, v in restored.items():
+                                if k in process.output:
+                                    process.output[k].value = v
+                            process.status = ProcessStatus.COMPLETED
+                            completed_children.append(process)
+                            skip_group = True
+                    if skip_group:
+                        # Still resolve param connections so downstream steps
+                        # see the injected outputs.
+                        for source, target in param_connections:
+                            if source.value is not None:
+                                target.value = source.value
+                        continue
+                await self._emit_event(
+                    "group_started",
+                    group_index=group_idx,
+                    group_size=len(group),
+                    execution_mode="parallel" if len(group) > 1 else "sequential"
+                )
 
-                if not success:
-                    raise Exception(
-                        f"Process '{process.name}' failed: {process.error}"
-                    )
-            else:
-                # Parallel execution
-                tasks = [p.execute() for p in group]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # Resolve parameter connections BEFORE executing this group
+                for source, target in param_connections:
+                    # Only resolve if source has a value
+                    if source.value is not None:
+                        target.value = source.value
 
-                # Check for failures
-                for process, result in zip(group, results):
-                    if isinstance(result, Exception):
-                        raise Exception(
-                            f"Process '{process.name}' failed: {str(result)}"
-                        )
-                    elif not result:
+                # Conditional skip: evaluate skip_when against the live
+                # orchestrator (so it can read prior step outputs). Skipped
+                # steps count as completed pass-throughs.
+                runnable = []
+                for process in group:
+                    skip_fn = getattr(process, "_skip_when", None)
+                    if skip_fn is not None:
+                        try:
+                            should_skip = bool(skip_fn(self))
+                        except Exception:
+                            should_skip = False
+                        if should_skip:
+                            process.status = ProcessStatus.COMPLETED
+                            completed_children.append(process)
+                            await process._emit_event("skipped")
+                            continue
+                    runnable.append(process)
+                if not runnable:
+                    await self._emit_event("group_completed", group_index=group_idx)
+                    continue
+                group = runnable
+
+                if len(group) == 1:
+                    # Sequential execution
+                    process = group[0]
+                    success = await process.execute()
+
+                    if not success:
                         raise Exception(
                             f"Process '{process.name}' failed: {process.error}"
                         )
 
-            await self._emit_event(
-                "group_completed",
-                group_index=group_idx
+                    completed_children.append(process)
+                else:
+                    # Parallel execution
+                    tasks = [p.execute() for p in group]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    # Mark children that completed before checking failures —
+                    # parallel siblings may have all run, but only successful
+                    # ones go on the compensation list.
+                    for process, result in zip(group, results):
+                        if isinstance(result, bool) and result:
+                            completed_children.append(process)
+
+                    # Check for failures
+                    for process, result in zip(group, results):
+                        if isinstance(result, Exception):
+                            raise Exception(
+                                f"Process '{process.name}' failed: {str(result)}"
+                            )
+                        elif not result:
+                            raise Exception(
+                                f"Process '{process.name}' failed: {process.error}"
+                            )
+
+                await self._emit_event(
+                    "group_completed",
+                    group_index=group_idx
+                )
+
+            # Resolve output parameter connections AFTER all execution
+            for source, target in param_connections:
+                if source.value is not None:
+                    target.value = source.value
+
+            # Call hook for post-execution logic
+            await self.after_children_executed()
+
+        except WorkflowSuspend as suspend:
+            # Annotate which step suspended so the runner can persist the
+            # resume-position. NO saga sweep — suspension is not failure.
+            for group in sequential_groups:
+                for process in group:
+                    if process.status == ProcessStatus.WAITING:
+                        suspend.suspended_step = process.name
+                        break
+            # Snapshot all completed steps' outputs so the runner can persist
+            # them — on resume they are restored into the pass-through steps.
+            # Without this, outputs from steps between two suspension points
+            # would be lost (fresh instance on each resume).
+            suspend.completed_outputs = {
+                child.name: {
+                    k: p.value for k, p in child.output.items()
+                    if p.value is not None
+                }
+                for child in completed_children
+            }
+            raise
+
+        except Exception as forward_error:
+            # Saga sweep: compensate completed children in REVERSE order.
+            # Children without compensate_impl() override are skipped (no-op).
+            await self._saga_compensate(completed_children, forward_error)
+            raise
+
+    async def _saga_compensate(
+        self,
+        completed_children: List[Process],
+        forward_error: Exception,
+    ):
+        """Compensate already-completed children in reverse execution order.
+
+        Failures during compensation are recorded but do NOT abort the sweep —
+        we try every child. The compensation summary is emitted as a single
+        event for monitoring. Async-compensation (long-running rollbacks) is
+        handled by spawning a child-run with `parent_relation='compensation'`
+        — see swfme_api documentation for the pattern.
+        """
+        if not completed_children:
+            return
+
+        candidates = [c for c in reversed(completed_children) if c.has_compensation]
+        if not candidates:
+            self.logger.info(
+                "Saga sweep skipped for '%s' — no completed children declare compensation",
+                self.name,
             )
+            return
 
-        # Resolve output parameter connections AFTER all execution
-        for source, target in param_connections:
-            if source.value is not None:
-                target.value = source.value
+        await self._emit_event(
+            "saga_compensation_started",
+            forward_error=str(forward_error),
+            compensation_targets=[c.name for c in candidates],
+        )
 
-        # Call hook for post-execution logic
-        await self.after_children_executed()
+        compensated = []
+        failed = []
+        for child in candidates:
+            ok = await child.compensate()
+            if ok:
+                compensated.append(child.name)
+            else:
+                failed.append({
+                    "name": child.name,
+                    "error": child.compensation_error,
+                })
+
+        await self._emit_event(
+            "saga_compensation_completed",
+            compensated=compensated,
+            compensation_failed=failed,
+            forward_error=str(forward_error),
+        )
+
+        if failed:
+            self.logger.error(
+                "Saga sweep for '%s': %d/%d children compensated, %d failed",
+                self.name, len(compensated), len(candidates), len(failed),
+            )
 
     def _group_processes(self) -> List[List[Process]]:
         """
