@@ -32,13 +32,22 @@ class WaitForEvent(AtomarProcess):
             description="After this many hours the workflow resumes with "
                         "triggered_by='timeout' and empty event_payload.",
         ))
+        self.input.add(InputParameter(
+            "timeout_minutes", int, required=False, default=0,
+            description="Optional, takes precedence over timeout_hours when > 0. "
+                        "For short human-reach timeouts (ReachHuman, #5508). The "
+                        "expiry sweeper runs every 60 s, so resolution is ~1 min.",
+        ))
         self.output.add(OutputParameter("event_payload", dict, required=False))
         self.output.add(OutputParameter("triggered_by", str, required=False))
 
     async def execute_impl(self):
-        timeout_at = datetime.utcnow() + timedelta(
-            hours=self.input["timeout_hours"].value or 720
-        )
+        minuten = self.input["timeout_minutes"].value
+        if isinstance(minuten, int) and not isinstance(minuten, bool) and minuten > 0:
+            dauer = timedelta(minutes=minuten)
+        else:
+            dauer = timedelta(hours=self.input["timeout_hours"].value or 720)
+        timeout_at = datetime.utcnow() + dauer
         raise WorkflowSuspend(wait_for={
             "filter": self.input["event_filter"].value,
             "timeout_at": timeout_at.isoformat() + "Z",
