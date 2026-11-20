@@ -47,6 +47,12 @@ class HumanApprovalGate(AtomarProcess):
         ))
         self.output.add(OutputParameter("decision", str, required=False))
         self.output.add(OutputParameter("reviewer_note", str, required=False))
+        # Wer auf welchem Weg entschieden hat, von der Engine gesetzt, nie vom
+        # Aufrufer: {art: mensch|override|frist, kanal: api|link|comm|frist,
+        # von, lauf, schritt, inhalt_sha256}. `decision` bleibt das Urteil;
+        # wer nur die Freigabe des benannten Menschen gelten lassen will,
+        # prueft zusaetzlich art == "mensch" und lauf == eigene run_id.
+        self.output.add(OutputParameter("entscheidung", dict, required=False))
 
     async def execute_impl(self):
         raise WorkflowSuspend(pending_decision={
