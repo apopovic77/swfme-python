@@ -11,6 +11,7 @@ Year: 2025 (Modernized from 2010 C# version)
 import uuid
 import asyncio
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime
@@ -285,6 +286,80 @@ class Process(ABC):
             "outputs": self._param_preview(self.output) if include_outputs else {}
         }
 
+    async def _emit_graph_snapshot(self):
+        """Emit a graph snapshot event for orchestrated processes."""
+        if not isinstance(self, OrchestratedProcess):
+            return
+
+        groups = self._group_processes()
+        param_map: Dict[int, Dict[str, Any]] = {}
+        nodes = []
+        edges = []
+
+        for group_index, group in enumerate(groups):
+            execution_flag = "parallel" if len(group) > 1 else "sequential"
+            for process in group:
+                node_inputs = {p.name: self._type_name(p.param_type) for p in process.input.values()}
+                node_outputs = {p.name: self._type_name(p.param_type) for p in process.output.values()}
+
+                for p in process.input.values():
+                    param_map[id(p)] = {
+                        "process": process.name,
+                        "param": p.name,
+                        "direction": "input",
+                        "type": self._type_name(p.param_type),
+                    }
+                for p in process.output.values():
+                    param_map[id(p)] = {
+                        "process": process.name,
+                        "param": p.name,
+                        "direction": "output",
+                        "type": self._type_name(p.param_type),
+                    }
+
+                nodes.append({
+                    "id": process.name,
+                    "name": process.name,
+                    "class_name": process.__class__.__name__,
+                    "type": "atomic",
+                    "group_index": group_index,
+                    "execution_flag": execution_flag,
+                    "inputs": node_inputs,
+                    "outputs": node_outputs,
+                })
+
+        for source, target in getattr(self, "_param_connections", []):
+            source_meta = param_map.get(id(source))
+            target_meta = param_map.get(id(target))
+            if not source_meta or not target_meta:
+                continue
+            edges.append({
+                "id": f"{source_meta['process']}:{source_meta['param']}->{target_meta['process']}:{target_meta['param']}",
+                "source": source_meta["process"],
+                "target": target_meta["process"],
+                "source_param": source_meta["param"],
+                "target_param": target_meta["param"],
+                "param_type": source_meta["type"],
+            })
+
+        # Import here to avoid circular dependency
+        from swfme.monitoring.event_bus import event_bus
+        await event_bus.emit({
+            "type": "graph.snapshot",
+            "process_id": self.id,
+            "process_name": self.name,
+            "process_class": self.__class__.__name__,
+            "timestamp": datetime.utcnow().isoformat(),
+            "nodes": nodes,
+            "edges": edges,
+        })
+
+    def _type_name(self, param_type: Any) -> str:
+        try:
+            return param_type.__name__
+        except Exception:
+            return str(param_type)
+
     def _param_preview(self, params) -> Dict[str, Any]:
         preview = {}
         for name, param in params.items():
@@ -324,6 +399,9 @@ class Process(ABC):
             }
 
         return str(val)[:max_str] + ("…" if len(str(val)) > max_str else "")
+
+
+class AtomarProcess(Process):
 
     def to_dict(self) -> dict:
         """Convert process to dictionary representation"""
@@ -527,6 +605,14 @@ class OrchestratedProcess(Process):
         if not self._orchestration_defined:
             self.orchestrate()
             self._orchestration_defined = True
+
+        # Emit static graph snapshot for observers (optional)
+        if os.getenv("SWFME_OBSERVE", "1") == "1":
+            try:
+                await self._emit_graph_snapshot()
+            except Exception:
+                # Avoid failing execution due to observability
+                self.logger.warning("Failed to emit graph snapshot", exc_info=True)
 
         # Get parameter connections if defined
         param_connections = getattr(self, '_param_connections', [])
