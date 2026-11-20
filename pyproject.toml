@@ -34,7 +34,8 @@ classifiers = [
 ]
 
 dependencies = [
-    # Core async support (built-in, no external deps needed)
+    # emit_audit (core.atomars), agents und processes rufen per httpx auf
+    "httpx>=0.24",
 ]
 
 [project.optional-dependencies]
@@ -61,8 +62,11 @@ Documentation = "https://github.com/apopovic77/swfme-python#readme"
 Repository = "https://github.com/apopovic77/swfme-python"
 Issues = "https://github.com/apopovic77/swfme-python/issues"
 
-[tool.setuptools]
-packages = ["swfme", "swfme.core", "swfme.monitoring", "swfme.api", "swfme.registry"]
+# Alle Unterpakete automatisch: die feste Liste liess swfme.core.atomars,
+# persistence, agents und processes in nicht editierbaren Installationen weg
+# (Befund Cloud-Operator 21.11.).
+[tool.setuptools.packages.find]
+include = ["swfme*"]
 
 [tool.black]
 line-length = 100
