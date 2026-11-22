@@ -18,7 +18,9 @@ from swfme.core.process import AtomarProcess
 
 logger = logging.getLogger("swfme.atomars.emit_audit")
 
-CONTENT_API_BASE = os.getenv("CONTENT_API_BASE", "https://content-api.arkturian.com")
+# Keine Betreiber-Vorgabe (#3591): ohne CONTENT_API_BASE geht kein Audit hinaus, auf einer
+# Kundeninstanz also nie an die content-api des Betreibers.
+CONTENT_API_BASE = (os.getenv("CONTENT_API_BASE") or "").strip().rstrip("/")
 CONTENT_API_KEY = os.getenv("CONTENT_ADMIN_API_KEY")
 
 
@@ -38,6 +40,11 @@ class EmitAudit(AtomarProcess):
 
         if not target:
             logger.info("EmitAudit (no target): %s", message)
+            self.output["emitted"].value = False
+            return
+
+        if target.startswith("content_post:") and not CONTENT_API_BASE:
+            logger.warning("EmitAudit: CONTENT_API_BASE fehlt, Audit fuer %s nicht gesendet: %s", target, message)
             self.output["emitted"].value = False
             return
 

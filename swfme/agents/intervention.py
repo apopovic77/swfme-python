@@ -70,7 +70,7 @@ class ProcessAgentIntervention(AtomarProcess):
         ))
         self.input.add(InputParameter(
             "cloud_api_url", str, required=False,
-            default="https://cloud.arkserver.arkturian.com",
+            default="",
             description="Cloud API base URL"
         ))
         self.input.add(InputParameter(
@@ -106,7 +106,9 @@ class ProcessAgentIntervention(AtomarProcess):
     async def execute_impl(self):
         message = self.input["message"].value
         session_name = self.input["agent_session"].value
-        cloud_api_url = self.input["cloud_api_url"].value
+        cloud_api_url = (self.input["cloud_api_url"].value or "").strip()
+        if not cloud_api_url and not self._injected_session:
+            raise ValueError("cloud_api_url fehlt (keine Betreiber-Vorgabe, #3591)")
         user_id = self.input["user_id"].value
         timeout = self.input["timeout"].value
         parse_json = self.input["parse_json"].value

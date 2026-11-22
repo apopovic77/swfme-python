@@ -9,10 +9,21 @@ Author: Alex Popovic (Arkturian)
 
 from typing import Optional, Dict, Any
 
+import os
+
 import httpx
 
 from swfme.core.process import AtomarProcess
 from swfme.core.parameters import InputParameter, OutputParameter
+
+
+def _api_url(wert):
+    """content-api der eigenen Instanz: aus dem Parameter, sonst CONTENT_API_BASE. Keine Betreiber-Vorgabe
+    (#3591): fehlt beides, bricht der Schritt ab, statt den Betreiber aufzurufen."""
+    url = (wert or os.getenv("CONTENT_API_BASE") or "").strip().rstrip("/")
+    if not url:
+        raise ValueError("content_api_url fehlt und CONTENT_API_BASE ist nicht gesetzt (#3591)")
+    return url
 
 
 class ProcessHTTPRequest(AtomarProcess):
@@ -95,7 +106,7 @@ class ProcessStoreContent(AtomarProcess):
         ))
         self.input.add(InputParameter(
             "content_api_url", str, required=False,
-            default="https://content-api.arkturian.com"
+            default=""
         ))
 
         self.output.add(OutputParameter("post_id", int, required=True))
@@ -105,7 +116,7 @@ class ProcessStoreContent(AtomarProcess):
         title = self.input["title"].value
         content = self.input["content"].value
         metadata = self.input["metadata"].value
-        api_url = self.input["content_api_url"].value
+        api_url = _api_url(self.input["content_api_url"].value)
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -147,7 +158,7 @@ class ProcessFetchContent(AtomarProcess):
         self.input.add(InputParameter("post_id", int, required=True))
         self.input.add(InputParameter(
             "content_api_url", str, required=False,
-            default="https://content-api.arkturian.com"
+            default=""
         ))
 
         self.output.add(OutputParameter("title", str, required=True))
@@ -156,7 +167,7 @@ class ProcessFetchContent(AtomarProcess):
 
     async def execute_impl(self):
         post_id = self.input["post_id"].value
-        api_url = self.input["content_api_url"].value
+        api_url = _api_url(self.input["content_api_url"].value)
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(f"{api_url}/api/v1/posts/{post_id}")
