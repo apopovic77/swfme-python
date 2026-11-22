@@ -33,7 +33,7 @@ class AgentMessage:
 class AgentSessionConfig:
     """Configuration for an agent session."""
     name: str
-    cloud_api_url: str = "https://cloud.arkserver.arkturian.com"
+    cloud_api_url: str = ""          # Pflicht beim Aufruf, keine Betreiber-Vorgabe (#3591)
     model: str = "sonnet"
     pretty: bool = True
     prompt_post_id: Optional[int] = None
@@ -58,7 +58,7 @@ class AgentSession:
     Example:
         session = AgentSession(AgentSessionConfig(
             name="email-agent",
-            cloud_api_url="https://cloud.arkserver.arkturian.com"
+            cloud_api_url="http://127.0.0.1:8050"
         ))
 
         # Ensure agent is running
@@ -78,7 +78,10 @@ class AgentSession:
 
     @property
     def _api_base(self) -> str:
-        return f"{self.config.cloud_api_url}/api"
+        url = (self.config.cloud_api_url or "").strip().rstrip("/")
+        if not url:
+            raise ValueError("cloud_api_url fehlt (keine Betreiber-Vorgabe, #3591)")
+        return f"{url}/api"
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
